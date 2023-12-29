@@ -1,0 +1,6 @@
+*.o
+bmpparse
+reader
+*.swp
+extracted/
+VOLUME.*
