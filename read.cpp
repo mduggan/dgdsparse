@@ -1,7 +1,4 @@
 #include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <vector>
 #include "types.h"
 
 uint32 readuint32(FILE *f) {

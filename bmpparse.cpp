@@ -3,16 +3,200 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <vector>
+#include <assert.h>
 #include "types.h"
 #include "read.h"
 
-struct Img {
+struct SubImgInfo {
+    byte *outbuf;
+    uint16 off;
     uint16 w;
     uint16 h;
-    uint16 off;
 };
 
-void parsevqt(FILE *f, vector<Img> &imgs) {
+struct DecoderState {
+    uint16 offset;
+    uint16 carry;
+    byte *inputPtr;
+    byte *dstPtrs[4];
+    uint16 rowStarts[200];
+};
+
+struct DecoderState *g_currentDecode = nullptr;
+
+
+void doVqtDecode2(const word x, const word y, const word w, const word h) {
+    if (h == 0 || w == 0)
+        return;
+
+    if (w == 1 && h == 1) {
+        const uint16 offset = g_currentDecode->offset;
+        const uint16 carry = g_currentDecode->carry;
+        g_currentDecode->offset += 8;
+        if (offset > 0xfff7)
+            g_currentDecode->carry++;
+        g_currentDecode->dstPtrs[x & 3][(g_currentDecode->rowStarts[y] + x) >> 2] =
+            (char)(*(uint *)(g_currentDecode->inputPtr +
+                        (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                          ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                         ((carry >> 2 & 1) != 0) << 0xf)) >> (offset & 7));
+        return;
+    }
+
+    const uint losize = (w & 0xff) * (h & 0xff);
+    uint bitcount1 = 8;
+    if ((losize >> 8) == 0) {
+        bitcount1 = 0;
+        byte b = (byte)(losize - 1);
+        do {
+            bitcount1++;
+            b >>= 1;
+        } while (b != 0);
+    }
+
+    uint16 firstval;
+    {
+        const uint16 offset = g_currentDecode->offset;
+        const uint16 carry = g_currentDecode->carry;
+        g_currentDecode->offset += bitcount1;
+
+        if ((int)offset + bitcount1 > 65535)
+            g_currentDecode->carry = g_currentDecode->carry + 1;
+        firstval = *(uint *)(g_currentDecode->inputPtr +
+                (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                  ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                 ((carry >> 2 & 1) != 0) << 0xf)) >> (offset & 7) &
+            (byte)(0xff00 >> (0x10 - bitcount1));
+    }
+
+    uint16 bitcount2 = 0;
+    byte bval = (byte)firstval;
+    while (firstval != 0) {
+        bitcount2++;
+        firstval = (byte)firstval >> 1;
+    }
+
+    bval++;
+
+    if (losize * 8 <= losize * bitcount2 + bval * 8) {
+        for (uint xx = x; xx < x + w; xx++) {
+            for (uint yy = y; yy < (y + h); yy++) {
+                const uint16 offset = g_currentDecode->offset;
+                const uint16 carry = g_currentDecode->carry;
+                g_currentDecode->offset += 8;
+                g_currentDecode->carry += (0xfff7 < offset);
+                g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
+                    (char)(*(uint *)(g_currentDecode->inputPtr +
+                                (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                                  ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                                 ((carry >> 2 & 1) != 0) << 0xf)) >> (offset & 7));
+            }
+        }
+        return;
+    }
+
+    if (bval == 1) {
+        const uint16 offset = g_currentDecode->offset;
+        const uint16 carry = g_currentDecode->carry;
+        g_currentDecode->offset += 8;
+        if (offset > 0xfff7)
+            g_currentDecode->carry++;
+        const uint16 val = *(uint *)(g_currentDecode->inputPtr +
+                (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                  ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                 ((carry >> 2 & 1) != 0) << 0xf));
+        for (uint yy = y; yy < y + h; yy++) {
+            for (uint xx = x; xx < x + w; xx++) {
+                g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
+                        (val >> (offset & 7));
+            }
+        }
+        return;
+    }
+
+    byte tmpbuf [262];
+    byte *ptmpbuf = tmpbuf;
+    do {
+        const uint16 offset = g_currentDecode->offset;
+        const uint16 carry = g_currentDecode->carry;
+        g_currentDecode->offset += 8;
+        if (offset > 0xfff7)
+            g_currentDecode->carry++;
+        *ptmpbuf = (byte)(*(uint *)(g_currentDecode->inputPtr +
+                    (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                      ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                     ((carry >> 2 & 1) != 0) << 0xf)) >> (offset & 7));
+        ptmpbuf++;
+        bval--;
+    } while (bval != 0);
+
+    for (uint xx = x; xx < x + w; xx++) {
+        for (uint yy = y; yy < y + h; yy++) {
+            const byte b = (byte)bitcount2;
+            const uint16 offset = g_currentDecode->offset;
+            const uint16 carry = g_currentDecode->carry;
+            g_currentDecode->offset += bitcount2;
+            if ((int)offset + bitcount2 > 65535)
+                g_currentDecode->carry++;
+            /* shift 3 bits off DX and rotate them into AX */
+            g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
+                tmpbuf[*(uint *)(g_currentDecode->inputPtr +
+                        (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+                          ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+                         ((carry >> 2 & 1) != 0) << 0xf)) >> (offset & 7) &
+                (byte)(0xff00 >> (0x10 - b))];
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////
+
+void doVqtDecode(word x,word y,word w,word h) {
+    if (!w && !h)
+        return;
+
+    const uint16 offset = g_currentDecode->offset;
+    const uint16 carry = g_currentDecode->carry;
+    g_currentDecode->offset = offset + 4;
+    if ((int)offset + 4 > 65535)
+        g_currentDecode->carry++;
+
+    const uint16 bits = *(uint *)(g_currentDecode->inputPtr +
+            (((offset >> 1 | (carry & 1) << 0xf) >> 1 |
+              ((carry >> 1 & 1) != 0) << 0xf) >> 1 |
+             ((carry >> 2 & 1) != 0) << 0xf));
+    const uint16 mask = bits >> (offset & 7);
+
+    // Top left quadrant
+    if (mask & 8)
+        doVqtDecode(x, y, w / 2, h / 2);
+    else
+        doVqtDecode2(x, y, w / 2, h / 2);
+
+    // Top right quadrant
+    if (mask & 4)
+        doVqtDecode(x + (w / 2), y, (w + 1) >> 1, h >> 1);
+    else
+        doVqtDecode2(x + (w / 2), y, (w + 1) >> 1, h >> 1);
+
+    // Bottom left quadrant
+    if (mask & 2)
+        doVqtDecode(x, y + (h / 2), w / 2, (h + 1) / 2);
+    else
+        doVqtDecode2(x, y + (h / 2), w / 2, (h + 1) / 2);
+
+    // Bottom right quadrant
+    if (mask & 1)
+        doVqtDecode(x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
+    else
+        doVqtDecode2(x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
+}
+
+
+////////////////////////////////////////////////////////////////////
+
+void parsevqt(FILE *f, vector<SubImgInfo> &imgs, const char *fname) {
     uint32 vsize = readuint32(f);
     bool morechunks = vsize & 0x80000000;
     if (morechunks) {
@@ -30,6 +214,7 @@ void parsevqt(FILE *f, vector<Img> &imgs) {
         exit(1);
     }
     uint32 osize = readuint32(f);
+    bool gotoffsets = false;
     if (osize == 2) {
         uint16 x = readuint16(f);
         printf("WARN: expect %d bytes of offsets for %d imgs, got single short 0x%X\n", (int)imgs.size() * 4, (int)imgs.size(), x);
@@ -40,24 +225,65 @@ void parsevqt(FILE *f, vector<Img> &imgs) {
         for (int i = 0; i < imgs.size(); i++) {
             imgs[i].off = readuint32(f);
         }
+        gotoffsets = true;
     }
 
     printf("  VQT format BMP with %d sub-imgs\n", (int)imgs.size());
     printf("  Width\tHeight\tOffset\n");
-    for (int i = 0; i < imgs.size(); i++) {
-        printf("  %d\t%d\t%d\n", imgs[i].w, imgs[i].h, imgs[i].off);
-        fseek(f, vqtstart + imgs[i].off, SEEK_SET);
-        byte *buf = (byte *)malloc(128 * 1024);
-        memset(buf, 0, 128*1024);
-        if (i < imgs.size() - 1) {
-            fread(buf, 1, imgs[i + 1].off - imgs[i].off, f);
-        } else {
-            fread(buf, 1, vsize - imgs[i].off, f);
+    byte *buf = (byte *)malloc(64 * 1024);
+    memset(buf, 0, 64*1024);
+    if (gotoffsets) {
+        for (int i = 0; i < imgs.size(); i++) {
+            uint16 w = imgs[i].w;
+            uint16 h = imgs[i].h;
+            printf("  %d\t%d\t%d\n", w, h, imgs[i].off);
+            byte *outbuf = imgs[i].outbuf;
+            if (!outbuf)
+                continue;
+            fseek(f, vqtstart + imgs[i].off, SEEK_SET);
+
+            if (i < imgs.size() - 1)
+                fread(buf, 1, imgs[i + 1].off - imgs[i].off, f);
+            else
+                fread(buf, 1, vsize - imgs[i].off, f);
+
+            // TODO: Do something to decode the data in buf - decode into img[i].outbuf
+            DecoderState state;
+            state.offset = 0;
+            state.carry = 0;
+            state.inputPtr = buf;
+
+            g_currentDecode = &state;
+
+            int npx = w * h;
+            for (int j = 0; j < 4; j++) {
+                g_currentDecode->dstPtrs[j] = outbuf + j * (npx / 4);
+            }
+
+            memset(state.rowStarts, 0, sizeof(state.rowStarts));
+            for (int r = 0; r < h; r++)
+                state.rowStarts[r] = w * r;
+
+            doVqtDecode(0, 0, w, h);
+
+            char tmpbuf[128];
+            snprintf(tmpbuf, 128, "%s-img-%02d-%d-%d.pgm", fname, i, w, h);
+            FILE *dmpfile = fopen(tmpbuf, "wb");
+            fprintf(dmpfile, "P5 %d %d 255\n", w, h);
+            for (int b = 0; b < npx / 4; b++) {
+                fwrite(g_currentDecode->dstPtrs[0] + b, 1, 1, dmpfile);
+                fwrite(g_currentDecode->dstPtrs[1] + b, 1, 1, dmpfile);
+                fwrite(g_currentDecode->dstPtrs[2] + b, 1, 1, dmpfile);
+                fwrite(g_currentDecode->dstPtrs[3] + b, 1, 1, dmpfile);
+            }
+            //fwrite(outbuf, npx, 1, dmpfile);
+
+            fclose(dmpfile);
         }
     }
 }
 
-void parsebin(FILE *f, vector<Img> &imgs) {
+void parsebin(FILE *f, vector<SubImgInfo> &imgs) {
     uint32 csize = readuint32(f);
     bool morechunks = csize & 0x80000000;
     if (morechunks) {
@@ -67,7 +293,7 @@ void parsebin(FILE *f, vector<Img> &imgs) {
     printf("  BIN format BMP with %d sub-imgs\n", (int)imgs.size());
 }
 
-void readbmp(FILE *f) {
+void readbmp(FILE *f, const char *fname) {
     char fourcc[4];
     fread(fourcc, 4, 1, f);
     if (strncmp(fourcc, "BMP:", 4)) {
@@ -94,16 +320,25 @@ void readbmp(FILE *f) {
         exit(1);
     }
     int nimgs = readuint16(f);
-    vector<Img> imgs;
+    vector<SubImgInfo> imgs;
     imgs.resize(nimgs);
     for (int i = 0; i < nimgs; i++)
         imgs[i].w = readuint16(f);
     for (int i = 0; i < nimgs; i++)
         imgs[i].h = readuint16(f);
+    for (int i = 0; i < nimgs; i++) {
+        imgs[i].off = 0;
+        if (imgs[i].w * imgs[i].h > 0) {
+            int nbytes = imgs[i].w * ((imgs[i].h + 4) / 4) * 4;
+            printf("malloc %d bytes\n", nbytes);
+            imgs[i].outbuf = (byte *)malloc(nbytes);
+            memset(imgs[i].outbuf, 0, nbytes);
+        }
+    }
 
     fread(fourcc, 4, 1, f);
     if (!strncmp(fourcc, "VQT:", 4)) {
-        parsevqt(f, imgs);
+        parsevqt(f, imgs, fname);
     } else if (!strncmp(fourcc, "BIN:", 4)) {
         parsebin(f, imgs);
     } else {
@@ -113,16 +348,21 @@ void readbmp(FILE *f) {
 }
 
 int main(int argc, char **argv) {
+    const char *fname;
     if (argc < 2) {
         printf("usage: bmpparse FILE.BMP\n");
-        exit(1);
+        fname = "extracted/VOLUME.002/CLMUTSLO.BMP";
+        printf("default to file %s\n", fname);
+    } else {
+        fname = argv[1];
     }
-    FILE *f = fopen(argv[1], "rb");
+
+    FILE *f = fopen(fname, "rb");
     if (f == NULL) {
-        printf("ERROR: couldn't open %s\n", argv[1]);
+        printf("ERROR: couldn't open %s\n", fname);
         exit(1);
     }
-    readbmp(f);
+    readbmp(f, fname);
 
     return 0;
 }
