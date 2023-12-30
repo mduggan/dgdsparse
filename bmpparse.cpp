@@ -15,9 +15,7 @@ struct SubImgInfo {
 };
 
 struct DecoderState {
-    uint16 offset;
-    uint16 carry;
-
+    uint32 offset;
     byte *inputPtr;
     byte *dstPtrs[4];
     uint16 rowStarts[200];
@@ -41,14 +39,11 @@ void doVqtDecode2(const word x, const word y, const word w, const word h) {
         return;
 
     if (w == 1 && h == 1) {
-        const uint16 offset = g_currentDecode->offset;
-        const uint16 carry = g_currentDecode->carry;
-        g_currentDecode->offset += 8;
-        if (offset > 0xfff7)
-            g_currentDecode->carry++;
-        const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+        const uint32 offset = g_currentDecode->offset;
+        const uint16 index = offset >> 3;
         g_currentDecode->dstPtrs[x & 3][(g_currentDecode->rowStarts[y] + x) >> 2] =
             (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
+        g_currentDecode->offset += 8;
         return;
     }
 
@@ -65,14 +60,10 @@ void doVqtDecode2(const word x, const word y, const word w, const word h) {
 
     uint16 firstval;
     {
-        const uint16 offset = g_currentDecode->offset;
-        const uint16 carry = g_currentDecode->carry;
-        g_currentDecode->offset += bitcount1;
-
-        if ((int)offset + bitcount1 > 65535)
-            g_currentDecode->carry++;
-        const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+        const uint32 offset = g_currentDecode->offset;
+        const uint16 index = offset >> 3;
         firstval = *(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7) & (byte)(0xff00 >> (0x10 - bitcount1));
+        g_currentDecode->offset += bitcount1;
     }
 
     uint16 bitcount2 = 0;
@@ -87,62 +78,46 @@ void doVqtDecode2(const word x, const word y, const word w, const word h) {
     if (losize * 8 <= losize * bitcount2 + bval * 8) {
         for (uint xx = x; xx < x + w; xx++) {
             for (uint yy = y; yy < (y + h); yy++) {
-                const uint16 offset = g_currentDecode->offset;
-                const uint16 carry = g_currentDecode->carry;
-                g_currentDecode->offset += 8;
-                if (offset > 0xfff7)
-                    g_currentDecode->carry++;
-                const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+                const uint32 offset = g_currentDecode->offset;
+                const uint16 index = offset >> 3;
                 g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
                     (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
+                g_currentDecode->offset += 8;
             }
         }
         return;
     }
 
     if (bval == 1) {
-        const uint16 offset = g_currentDecode->offset;
-        const uint16 carry = g_currentDecode->carry;
-        g_currentDecode->offset += 8;
-        if (offset > 0xfff7)
-            g_currentDecode->carry++;
-        const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+        const uint32 offset = g_currentDecode->offset;
+        const uint16 index = offset >> 3;
         const uint16 val = *(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7);
         for (uint yy = y; yy < y + h; yy++) {
             for (uint xx = x; xx < x + w; xx++) {
                 g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] = val;
             }
         }
+        g_currentDecode->offset += 8;
         return;
     }
 
     byte tmpbuf [262];
     byte *ptmpbuf = tmpbuf;
-    do {
-        const uint16 offset = g_currentDecode->offset;
-        const uint16 carry = g_currentDecode->carry;
-        g_currentDecode->offset += 8;
-        if (offset > 0xfff7)
-            g_currentDecode->carry++;
-
-        const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+    for (; bval != 0; bval--) {
+        const uint32 offset = g_currentDecode->offset;
+        const uint16 index = offset >> 3;
         *ptmpbuf = (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
         ptmpbuf++;
-        bval--;
-    } while (bval != 0);
+        g_currentDecode->offset += 8;
+    }
 
     for (uint xx = x; xx < x + w; xx++) {
         for (uint yy = y; yy < y + h; yy++) {
-            const byte b = (byte)bitcount2;
-            const uint16 offset = g_currentDecode->offset;
-            const uint16 carry = g_currentDecode->carry;
-            g_currentDecode->offset += bitcount2;
-            if ((int)offset + bitcount2 > 65535)
-                g_currentDecode->carry++;
-
-            const uint16 index = (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 | (carry >> 2 & 1) << 0xf);
+            const uint32 offset = g_currentDecode->offset;
+            const uint16 index = offset >> 3;
             g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
-                tmpbuf[*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7) & (byte)(0xff00 >> (0x10 - b))];
+                tmpbuf[*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7) & (byte)(0xff00 >> (0x10 - bitcount2))];
+            g_currentDecode->offset += bitcount2;
         }
     }
 }
@@ -154,34 +129,12 @@ void doVqtDecode(word x,word y,word w,word h) {
     if (!w && !h)
         return;
 
-    const uint16 offset = g_currentDecode->offset;
-    const uint16 carry = g_currentDecode->carry;
-    uint32 acc = (uint32)carry << 16 | offset;
-
-
-    const uint16 index = (acc >> 3);
-    //        (((offset >> 1 | (carry & 1) << 0xf) >> 1 | (carry >> 1 & 1) << 0xf) >> 1 |
-    //             ((carry >> 2 & 1) << 0xf));
-
-    /*
-    printf("doVqtDecode: carry ");
-    printbits16(carry);
-    printf(" offset ");
-    printbits16(offset);
-    printf(" acc ");
-    printbits32(acc);
-    printf(" index ");
-    printbits16(index);
-    printf("\n");
-    */
-
+    const uint32 offset = g_currentDecode->offset;
+    const uint16 index = (offset >> 3);
+    g_currentDecode->offset += 4;
     const uint16 bits = *(uint *)(g_currentDecode->inputPtr + index);
-    const uint16 mask = bits >> (acc & 7);
+    const uint16 mask = bits >> (offset & 7);
 
-    acc += 4;
-
-    g_currentDecode->offset = acc & 0xffff;
-    g_currentDecode->carry = acc >> 16;
 
     // Top left quadrant
     if (mask & 8)
@@ -265,7 +218,6 @@ void parsevqt(FILE *f, vector<SubImgInfo> &imgs, const char *fname) {
             // TODO: Do something to decode the data in buf - decode into img[i].outbuf
             DecoderState state;
             state.offset = 0;
-            state.carry = 0;
             state.inputPtr = buf;
 
             g_currentDecode = &state;
