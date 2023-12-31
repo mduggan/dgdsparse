@@ -7,6 +7,7 @@
 #include "types.h"
 #include "read.h"
 
+
 struct SubImgInfo {
     byte *outbuf;
     uint16 off;
@@ -17,39 +18,33 @@ struct SubImgInfo {
 struct DecoderState {
     uint32 offset;
     byte *inputPtr;
-    byte *dstPtrs[4];
+    byte *dstPtr;
     uint16 rowStarts[200];
 };
 
-struct DecoderState *g_currentDecode = nullptr;
 
-
-void printbits16(uint16 x) {
-    for(int i=sizeof(x)<<3; i; i--)
-        putchar('0'+((x>>(i-1))&1));
+static inline uint16 getBits(struct DecoderState *decoder, int nbits) {
+    const uint32 offset = decoder->offset;
+   const uint32 index = offset >> 3;
+   const uint32 shift = offset & 7;
+   decoder->offset += nbits;
+   return (*(uint16 *)(decoder->inputPtr + index) >> (shift)) & (byte)(0xff00 >> (16 - nbits));
 }
 
-void printbits32(uint32 x) {
-    for(int i=sizeof(x)<<3; i; i--)
-        putchar('0'+((x>>(i-1))&1));
-}
-
-void doVqtDecode2(const word x, const word y, const word w, const word h) {
+void doVqtDecode2(struct DecoderState *state, const word x, const word y, const word w, const word h) {
+    // Empty region -> nothing to do
     if (h == 0 || w == 0)
         return;
 
+    // 1x1 region -> put the byte directly
     if (w == 1 && h == 1) {
-        const uint32 offset = g_currentDecode->offset;
-        const uint16 index = offset >> 3;
-        g_currentDecode->dstPtrs[x & 3][(g_currentDecode->rowStarts[y] + x) >> 2] =
-            (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
-        g_currentDecode->offset += 8;
+        state->dstPtr[state->rowStarts[y] + x] = getBits(state, 8);
         return;
     }
 
     const uint losize = (w & 0xff) * (h & 0xff);
     uint bitcount1 = 8;
-    if ((losize >> 8) == 0) {
+    if (losize < 256) {
         bitcount1 = 0;
         byte b = (byte)(losize - 1);
         do {
@@ -58,66 +53,46 @@ void doVqtDecode2(const word x, const word y, const word w, const word h) {
         } while (b != 0);
     }
 
-    uint16 firstval;
-    {
-        const uint32 offset = g_currentDecode->offset;
-        const uint16 index = offset >> 3;
-        firstval = *(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7) & (byte)(0xff00 >> (0x10 - bitcount1));
-        g_currentDecode->offset += bitcount1;
-    }
+    uint16 firstval = getBits(state, bitcount1);
 
     uint16 bitcount2 = 0;
     byte bval = (byte)firstval;
     while (firstval != 0) {
         bitcount2++;
-        firstval = (byte)firstval >> 1;
+        firstval >>= 1;
     }
 
     bval++;
 
     if (losize * 8 <= losize * bitcount2 + bval * 8) {
         for (uint xx = x; xx < x + w; xx++) {
-            for (uint yy = y; yy < (y + h); yy++) {
-                const uint32 offset = g_currentDecode->offset;
-                const uint16 index = offset >> 3;
-                g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
-                    (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
-                g_currentDecode->offset += 8;
+            for (uint yy = y; yy < y + h; yy++) {
+                state->dstPtr[state->rowStarts[yy] + xx] = getBits(state, 8);
             }
         }
         return;
     }
 
     if (bval == 1) {
-        const uint32 offset = g_currentDecode->offset;
-        const uint16 index = offset >> 3;
-        const uint16 val = *(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7);
+        const uint16 val = getBits(state, 8);
         for (uint yy = y; yy < y + h; yy++) {
             for (uint xx = x; xx < x + w; xx++) {
-                g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] = val;
+                state->dstPtr[state->rowStarts[yy] + xx] = val;
             }
         }
-        g_currentDecode->offset += 8;
         return;
     }
 
     byte tmpbuf [262];
     byte *ptmpbuf = tmpbuf;
     for (; bval != 0; bval--) {
-        const uint32 offset = g_currentDecode->offset;
-        const uint16 index = offset >> 3;
-        *ptmpbuf = (byte)(*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7));
+        *ptmpbuf = getBits(state, 8);
         ptmpbuf++;
-        g_currentDecode->offset += 8;
     }
 
     for (uint xx = x; xx < x + w; xx++) {
         for (uint yy = y; yy < y + h; yy++) {
-            const uint32 offset = g_currentDecode->offset;
-            const uint16 index = offset >> 3;
-            g_currentDecode->dstPtrs[xx & 3][(g_currentDecode->rowStarts[yy] + xx) >> 2] =
-                tmpbuf[*(uint *)(g_currentDecode->inputPtr + index) >> (offset & 7) & (byte)(0xff00 >> (0x10 - bitcount2))];
-            g_currentDecode->offset += bitcount2;
+            state->dstPtr[state->rowStarts[yy] + xx] = tmpbuf[getBits(state, bitcount2)];
         }
     }
 }
@@ -125,40 +100,35 @@ void doVqtDecode2(const word x, const word y, const word w, const word h) {
 
 ////////////////////////////////////////////////////////////////////
 
-void doVqtDecode(word x,word y,word w,word h) {
+void doVqtDecode(struct DecoderState *state, word x,word y,word w,word h) {
     if (!w && !h)
         return;
 
-    const uint32 offset = g_currentDecode->offset;
-    const uint16 index = (offset >> 3);
-    g_currentDecode->offset += 4;
-    const uint16 bits = *(uint *)(g_currentDecode->inputPtr + index);
-    const uint16 mask = bits >> (offset & 7);
-
+    const uint16 mask = getBits(state, 4);
 
     // Top left quadrant
     if (mask & 8)
-        doVqtDecode(x, y, w / 2, h / 2);
+        doVqtDecode(state, x, y, w / 2, h / 2);
     else
-        doVqtDecode2(x, y, w / 2, h / 2);
+        doVqtDecode2(state, x, y, w / 2, h / 2);
 
     // Top right quadrant
     if (mask & 4)
-        doVqtDecode(x + (w / 2), y, (w + 1) >> 1, h >> 1);
+        doVqtDecode(state, x + (w / 2), y, (w + 1) >> 1, h >> 1);
     else
-        doVqtDecode2(x + (w / 2), y, (w + 1) >> 1, h >> 1);
+        doVqtDecode2(state, x + (w / 2), y, (w + 1) >> 1, h >> 1);
 
     // Bottom left quadrant
     if (mask & 2)
-        doVqtDecode(x, y + (h / 2), w / 2, (h + 1) / 2);
+        doVqtDecode(state, x, y + (h / 2), w / 2, (h + 1) / 2);
     else
-        doVqtDecode2(x, y + (h / 2), w / 2, (h + 1) / 2);
+        doVqtDecode2(state, x, y + (h / 2), w / 2, (h + 1) / 2);
 
     // Bottom right quadrant
     if (mask & 1)
-        doVqtDecode(x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
+        doVqtDecode(state, x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
     else
-        doVqtDecode2(x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
+        doVqtDecode2(state, x + (w / 2), y + (h / 2), (w + 1) / 2, (h + 1) / 2);
 }
 
 
@@ -186,6 +156,8 @@ void parsevqt(FILE *f, vector<SubImgInfo> &imgs, const char *fname) {
     if (osize == 2) {
         uint16 x = readuint16(f);
         printf("WARN: expect %d bytes of offsets for %d imgs, got single short 0x%X\n", (int)imgs.size() * 4, (int)imgs.size(), x);
+        for (int i = 0; i < imgs.size(); i++)
+            imgs[i].off = 0;
     } else if (osize != imgs.size() * 4) {
         printf("ERROR: expect %d bytes of offsets for %d imgs, got %d\n", (int)imgs.size() * 4, (int)imgs.size(), osize);
         exit(1);
@@ -196,7 +168,7 @@ void parsevqt(FILE *f, vector<SubImgInfo> &imgs, const char *fname) {
         gotoffsets = true;
     }
 
-    printf("  VQT format BMP with %d sub-imgs\n", (int)imgs.size());
+    printf("  VQT format BMP with %d sub-imgs (%d bytes)\n", (int)imgs.size(), vsize);
     printf("  Width\tHeight\tOffset\n");
     byte *buf = (byte *)malloc(64 * 1024);
     memset(buf, 0, 64*1024);
@@ -219,35 +191,54 @@ void parsevqt(FILE *f, vector<SubImgInfo> &imgs, const char *fname) {
             DecoderState state;
             state.offset = 0;
             state.inputPtr = buf;
+            state.dstPtr = outbuf;
 
-            g_currentDecode = &state;
-
-            int npx = w * h;
-            for (int j = 0; j < 4; j++) {
-                g_currentDecode->dstPtrs[j] = outbuf + j * (npx / 4);
-            }
-
-            memset(state.rowStarts, 0, sizeof(state.rowStarts));
             for (int r = 0; r < h; r++)
                 state.rowStarts[r] = w * r;
 
-            doVqtDecode(0, 0, w, h);
+            doVqtDecode(&state, 0, 0, w, h);
 
             char tmpbuf[128];
             snprintf(tmpbuf, 128, "%s-img-%02d-%d-%d.pgm", fname, i, w, h);
             FILE *dmpfile = fopen(tmpbuf, "wb");
             fprintf(dmpfile, "P5 %d %d 255\n", w, h);
-            for (int b = 0; b < npx / 4; b++) {
-                fwrite(g_currentDecode->dstPtrs[0] + b, 1, 1, dmpfile);
-                fwrite(g_currentDecode->dstPtrs[1] + b, 1, 1, dmpfile);
-                fwrite(g_currentDecode->dstPtrs[2] + b, 1, 1, dmpfile);
-                fwrite(g_currentDecode->dstPtrs[3] + b, 1, 1, dmpfile);
-            }
-            //fwrite(outbuf, npx, 1, dmpfile);
+            fwrite(outbuf, w * h, 1, dmpfile);
 
             fclose(dmpfile);
         }
+    } else {
+        fseek(f, vqtstart, SEEK_SET);
+        fread(buf, 1, vsize, f);
+        uint32 lastoffset = 0;
+        for (int i = 0; i < imgs.size(); i++) {
+            uint16 w = imgs[i].w;
+            uint16 h = imgs[i].h;
+            printf("  %d\t%d\t%d\n", w, h, lastoffset / 8);
+            byte *outbuf = imgs[i].outbuf;
+            if (!outbuf)
+                continue;
+
+            DecoderState state;
+            state.offset = ((lastoffset + 7) / 8) * 8;
+            state.inputPtr = buf;
+            state.dstPtr = outbuf;
+
+            for (int r = 0; r < h; r++)
+                state.rowStarts[r] = w * r;
+
+            doVqtDecode(&state, 0, 0, w, h);
+
+            char tmpbuf[128];
+            snprintf(tmpbuf, 128, "%s-img-%02d-%d-%d.pgm", fname, i, w, h);
+            FILE *dmpfile = fopen(tmpbuf, "wb");
+            fprintf(dmpfile, "P5 %d %d 255\n", w, h);
+            fwrite(outbuf, w * h, 1, dmpfile);
+
+            fclose(dmpfile);
+            lastoffset = state.offset;
+        }
     }
+
 }
 
 void parsebin(FILE *f, vector<SubImgInfo> &imgs) {
@@ -297,7 +288,6 @@ void readbmp(FILE *f, const char *fname) {
         imgs[i].off = 0;
         if (imgs[i].w * imgs[i].h > 0) {
             int nbytes = imgs[i].w * ((imgs[i].h + 4) / 4) * 4;
-            printf("malloc %d bytes\n", nbytes);
             imgs[i].outbuf = (byte *)malloc(nbytes);
             memset(imgs[i].outbuf, 0, nbytes);
         }
