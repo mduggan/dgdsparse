@@ -13,12 +13,12 @@ struct Resource {
     char name[20];
 };
 
-static void readidx(vector<Resource> &resources) {
+static void readidx(const char *fname, vector<Resource> &resources) {
     char pathbuf[128];
     char *databuf = (char *)malloc(1024 * 1024);
-    FILE *f = fopen("VOLUME.VGA", "rb");
+    FILE *f = fopen(fname, "rb");
     if (f == NULL) {
-        printf("ERROR: Couldn't open VOLUME.VGA\n");
+        printf("ERROR: Couldn't open volume index %s\n", fname);
         exit(1);
     }
 
@@ -75,7 +75,11 @@ static void readidx(vector<Resource> &resources) {
 
 int main(int argc, char **argv) {
     vector<Resource> resources;
-    readidx(resources);
+    const char *fname = "VOLUME.VGA";
+    if (argc > 1)
+        fname = argv[1];
+
+    readidx(fname, resources);
 
     return 0;
 }
